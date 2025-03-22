@@ -7,57 +7,73 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 
-# Configuration of email address and password
-EMAIL_ADDRESS = 'florindangueffo@gmail.com'
-EMAIL_PASSWORD = 'ijjj sjmr xvxj ypnl'
+# Function to read email credentials from the file inside Docs/[attachments]/credentials
+def read_email_credentials(attachments_dir):
+    credentials_dir = os.path.join('Docs', attachments_dir, 'credentials')
+    credentials_file = os.path.join(credentials_dir, 'credentials.txt')
+    
+    if not os.path.isfile(credentials_file):
+        raise FileNotFoundError(f"The credentials file '{credentials_file}' was not found.")
+    
+    with open(credentials_file, 'r') as file:
+        credentials = file.readlines()
+        if len(credentials) < 2:
+            raise ValueError("The credentials file must contain email address and password.")
+        email_address = credentials[0].strip()
+        email_password = credentials[1].strip()
+    
+    return email_address, email_password
 
-# Parse arguments
+# Argument parsing
 parser = argparse.ArgumentParser(description="Send bulk emails with attachments.")
 parser.add_argument("--attachments", required=True, help="Directory containing attachments.")
 parser.add_argument("--emails", required=True, help="File containing recipient email addresses.")
 parser.add_argument("--message", required=True, help="File containing the email message.")
 args = parser.parse_args()
 
-# Data directory where email and message files are located
+# Data directories
 data_dir = 'Data'
 
-# Docs directory where attachment files are located
+# Docs directory containing attachments
 docs_dir = 'Docs'
 
-# Correct paths for attachments, emails, and message files
-attachments_dir = os.path.join(docs_dir, args.attachments)  # Attachments are in the 'Docs' folder
-emails_file = os.path.join(data_dir, args.emails)  # Emails file is in the 'Data' folder
-message_file = os.path.join(data_dir, args.message)  # Message file is in the 'Data' folder
+# Correct paths for attachments, emails, and the message
+attachments_dir = os.path.join(docs_dir, args.attachments)  # Directory of attachments inside 'Docs'
+emails_file = os.path.join(data_dir, args.emails)  
+message_file = os.path.join(data_dir, args.message)  
 
-# Check if the directory for attachments exists within the Docs folder
+# Read email credentials from the specified [attachments] directory
+EMAIL_ADDRESS, EMAIL_PASSWORD = read_email_credentials(args.attachments)
+
+# Check if the attachments directory exists in Docs
 if not os.path.isdir(attachments_dir):
-    raise FileNotFoundError(f"Attachments directory '{attachments_dir}' does not exist in Docs.")
+    raise FileNotFoundError(f"The attachments directory '{attachments_dir}' does not exist in Docs.")
 
-# Check if the email file exists in the Data folder
+# Check if the emails file exists in Data
 if not os.path.isfile(emails_file):
-    raise FileNotFoundError(f"Email file '{args.emails}' not found in Data.")
+    raise FileNotFoundError(f"The emails file '{args.emails}' was not found in Data.")
 
-# Check if the message file exists in the Data folder
+# Check if the message file exists in Data
 if not os.path.isfile(message_file):
-    raise FileNotFoundError(f"Message file '{args.message}' not found in Data.")
+    raise FileNotFoundError(f"The message file '{args.message}' was not found in Data.")
 
-# Create the Logs directory if it doesn't exist
+# Create the logs directory if it does not exist
 log_dir = 'Logs'
 if not os.path.exists(log_dir):
     os.makedirs(log_dir)
 
-# Create a subdirectory with the name based on the --attachments argument
+# Create a sub-directory for the logs named after the --attachments argument
 attachment_name = os.path.basename(attachments_dir)
 attachment_log_dir = os.path.join(log_dir, attachment_name)
 if not os.path.exists(attachment_log_dir):
     os.makedirs(attachment_log_dir)
 
-# Name of the log file based on the --attachments argument and date/time (with .log extension)
+# Log file name based on --attachments and current date/time
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 log_file_name = f"{attachment_name}_{timestamp}_email_log.log"
 log_file_path = os.path.join(attachment_log_dir, log_file_name)
 
-# Configure logger
+# Set up the logger
 logging.basicConfig(filename=log_file_path, level=logging.INFO, 
                     format='%(asctime)s - %(message)s')
 
@@ -66,7 +82,7 @@ try:
     with open(emails_file, 'r') as file:
         recipient_emails = [line.strip() for line in file if line.strip()]
 except Exception as e:
-    raise Exception(f"Error reading email file '{emails_file}': {e}")
+    raise Exception(f"Error reading the emails file '{emails_file}': {e}")
 
 # Read the message and extract the subject
 try:
@@ -75,7 +91,7 @@ try:
         subject = lines[0].split("Betreff: ")[1].strip() if "Betreff: " in lines[0] else "No Subject"
         email_body = ''.join(lines[1:])
 except Exception as e:
-    raise Exception(f"Error reading message file '{message_file}': {e}")
+    raise Exception(f"Error reading the message file '{message_file}': {e}")
 
 # Check if an email has already been sent
 def email_already_sent(recipient):
@@ -100,10 +116,16 @@ def send_email(recipient):
     msg['To'] = recipient
     msg.set_content(email_body)
 
-    # Add attachments
+    # Add attachments, excluding the 'credentials' directory
     try:
         for attachment in os.listdir(attachments_dir):
             attachment_path = os.path.join(attachments_dir, attachment)
+
+            # Exclude the 'credentials' directory files
+            if os.path.commonpath([attachment_path, os.path.join('Docs', args.attachments, 'credentials')]) == os.path.join('Docs', args.attachments, 'credentials'):
+                logging.info(f"Excluding {attachment} because it is from the 'credentials' directory.")
+                continue
+            
             with open(attachment_path, 'rb') as file:
                 file_data = file.read()
                 file_name = os.path.basename(attachment_path)
@@ -130,7 +152,7 @@ with ThreadPoolExecutor(max_workers=5) as executor:
         if result:
             successful_recipients.append(result)
 
-# Display recipients who received the email
+# Display the recipients who successfully received the email
 if successful_recipients:
     logging.info("Emails successfully sent to:")
     for recipient in successful_recipients:
@@ -144,7 +166,10 @@ else:
 # Save the number of emails sent
 logging.info(f"Emails sent: {total_sent}")
 
-# Calculate the total number of emails sent
+# Print out the success message and count of emails sent
+print(f"Program executed successfully. {total_sent} emails sent.")
+
+# Calculate total number of emails sent
 def get_total_emails_sent():
     try:
         total_emails = 0
