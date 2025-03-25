@@ -7,183 +7,168 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 
-# Function to read email credentials from the file inside Docs/[attachments]/credentials
+# Configure logging - No console output, only file logging
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)-8s - %(message)s', handlers=[])
+logger = logging.getLogger(__name__)
+
+def setup_file_logging(log_file_path):
+    """Setup file logging with the specified path"""
+    logger.handlers = []  # Clear existing handlers
+    file_handler = logging.FileHandler(log_file_path, mode='w')
+    file_handler.setLevel(logging.DEBUG)
+    formatter = logging.Formatter('%(asctime)s - %(levelname)-8s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+
 def read_email_credentials(attachments_dir):
-    credentials_dir = os.path.join('Docs', attachments_dir, 'credentials')
-    credentials_file = os.path.join(credentials_dir, 'credentials.txt')
-    
-    if not os.path.isfile(credentials_file):
-        raise FileNotFoundError(f"The credentials file '{credentials_file}' was not found.")
-    
-    with open(credentials_file, 'r') as file:
-        credentials = file.readlines()
-        if len(credentials) < 2:
-            raise ValueError("The credentials file must contain email address and password.")
-        email_address = credentials[0].strip()
-        email_password = credentials[1].strip()
-    
-    return email_address, email_password
+    """Read email credentials from credentials.txt file"""
+    try:
+        credentials_dir = os.path.join('Docs', attachments_dir, 'credentials')
+        credentials_file = os.path.join(credentials_dir, 'credentials.txt')
 
-# Argument parsing
-parser = argparse.ArgumentParser(description="Send bulk emails with attachments.")
-parser.add_argument("--attachments", required=True, help="Directory containing attachments.")
-parser.add_argument("--emails", required=True, help="File containing recipient email addresses.")
-parser.add_argument("--message", required=True, help="File containing the email message.")
-args = parser.parse_args()
+        if not os.path.isfile(credentials_file):
+            raise FileNotFoundError(f"Credentials file not found at {credentials_file}")
 
-# Data directories
-data_dir = 'Data'
+        with open(credentials_file, 'r') as file:
+            credentials = file.readlines()
+            if len(credentials) < 2:
+                raise ValueError("Credentials file must contain email and password on separate lines")
+            return credentials[0].strip(), credentials[1].strip()
+    except Exception as e:
+        logger.error("❌ Error reading credentials: %s", str(e))
+        raise
 
-# Docs directory containing attachments
-docs_dir = 'Docs'
-
-# Correct paths for attachments, emails, and the message
-attachments_dir = os.path.join(docs_dir, args.attachments)  # Directory of attachments inside 'Docs'
-emails_file = os.path.join(data_dir, args.emails)  
-message_file = os.path.join(data_dir, args.message)  
-
-# Read email credentials from the specified [attachments] directory
-EMAIL_ADDRESS, EMAIL_PASSWORD = read_email_credentials(args.attachments)
-
-# Check if the attachments directory exists in Docs
-if not os.path.isdir(attachments_dir):
-    raise FileNotFoundError(f"The attachments directory '{attachments_dir}' does not exist in Docs.")
-
-# Check if the emails file exists in Data
-if not os.path.isfile(emails_file):
-    raise FileNotFoundError(f"The emails file '{args.emails}' was not found in Data.")
-
-# Check if the message file exists in Data
-if not os.path.isfile(message_file):
-    raise FileNotFoundError(f"The message file '{args.message}' was not found in Data.")
-
-# Create the logs directory if it does not exist
-log_dir = 'Logs'
-if not os.path.exists(log_dir):
-    os.makedirs(log_dir)
-
-# Create a sub-directory for the logs named after the --attachments argument
-attachment_name = os.path.basename(attachments_dir)
-attachment_log_dir = os.path.join(log_dir, attachment_name)
-if not os.path.exists(attachment_log_dir):
-    os.makedirs(attachment_log_dir)
-
-# Log file name based on --attachments and current date/time
-timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-log_file_name = f"{attachment_name}_{timestamp}_email_log.log"
-log_file_path = os.path.join(attachment_log_dir, log_file_name)
-
-# Set up the logger
-logging.basicConfig(filename=log_file_path, level=logging.INFO, 
-                    format='%(asctime)s - %(message)s')
-
-# Read recipient emails from the file
-try:
-    with open(emails_file, 'r') as file:
-        recipient_emails = [line.strip() for line in file if line.strip()]
-except Exception as e:
-    raise Exception(f"Error reading the emails file '{emails_file}': {e}")
-
-# Read the message and extract the subject
-try:
-    with open(message_file, 'r') as file:
-        lines = file.readlines()
-        subject = lines[0].split("Betreff: ")[1].strip() if "Betreff: " in lines[0] else "No Subject"
-        email_body = ''.join(lines[1:])
-except Exception as e:
-    raise Exception(f"Error reading the message file '{message_file}': {e}")
-
-# Check if an email has already been sent
-def email_already_sent(recipient):
+def email_already_sent(recipient, email, password):
+    """Check if email was already sent to recipient"""
     try:
         with imaplib.IMAP4_SSL('imap.gmail.com') as imap:
-            imap.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
+            imap.login(email, password)
             imap.select('"[Gmail]/Sent Mail"')
             result, data = imap.search(None, f'TO "{recipient}"')
             return result == 'OK' and data[0]
     except Exception as e:
-        raise Exception(f"Error checking sent emails: {e}")
+        logger.error("⚠️ Error checking sent emails for %s: %s", recipient, str(e))
+        return False
 
-# Function to send an email
-def send_email(recipient):
-    if email_already_sent(recipient):
-        logging.info(f"Email already sent to {recipient}, skipping.")
-        return None
-
-    msg = EmailMessage()
-    msg['Subject'] = subject
-    msg['From'] = EMAIL_ADDRESS
-    msg['To'] = recipient
-    msg.set_content(email_body)
-
-    # Add attachments, excluding the 'credentials' directory
+def send_email(recipient, email, password, subject, body, attachments_dir, args):
+    """Send email to single recipient with error handling"""
     try:
+        if email_already_sent(recipient, email, password):
+            logger.debug("⏩ Already sent to %s - skipping", recipient)
+            return None
+
+        msg = EmailMessage()
+        msg['Subject'] = subject
+        msg['From'] = email
+        msg['To'] = recipient
+        msg.set_content(body)
+
+        # Add attachments
         for attachment in os.listdir(attachments_dir):
             attachment_path = os.path.join(attachments_dir, attachment)
-
-            # Exclude the 'credentials' directory files
-            if os.path.commonpath([attachment_path, os.path.join('Docs', args.attachments, 'credentials')]) == os.path.join('Docs', args.attachments, 'credentials'):
-                logging.info(f"Excluding {attachment} because it is from the 'credentials' directory.")
+            if "credentials" in attachment_path:
                 continue
             
-            with open(attachment_path, 'rb') as file:
-                file_data = file.read()
-                file_name = os.path.basename(attachment_path)
-                msg.add_attachment(file_data, maintype='application', subtype='octet-stream', filename=file_name)
-    except Exception as e:
-        raise Exception(f"Error adding attachments for {recipient}: {e}")
+            with open(attachment_path, 'rb') as f:
+                file_data = f.read()
+                msg.add_attachment(file_data, maintype='application', subtype='octet-stream', filename=attachment)
 
-    # Send the email
-    try:
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
-            smtp.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
+            smtp.login(email, password)
             smtp.send_message(msg)
-        logging.info(f"Email successfully sent to {recipient}.")
+        
+        logger.info("✔ Successfully sent to %s", recipient)
         return recipient
     except Exception as e:
-        raise Exception(f"Failed to send email to {recipient}: {e}")
+        logger.error("✖ Failed to send to %s: %s", recipient, str(e))
+        return None
 
-# Send emails in parallel
-successful_recipients = []
-with ThreadPoolExecutor(max_workers=5) as executor:
-    futures = {executor.submit(send_email, recipient): recipient for recipient in recipient_emails}
-    for future in as_completed(futures):
-        result = future.result()
-        if result:
-            successful_recipients.append(result)
+def log_email_summary(successful_recipients, all_recipients):
+    """Log a detailed summary of email sending results"""
+    logger.info("\n" + "="*60)
+    logger.info("📧 EMAIL SENDING SUMMARY REPORT (CURRENT SESSION)")
+    logger.info("="*60)
 
-# Display the recipients who successfully received the email
-if successful_recipients:
-    logging.info("Emails successfully sent to:")
-    for recipient in successful_recipients:
-        logging.info(f" - {recipient}")
-    total_sent = len(successful_recipients)
-    logging.info(f"Total emails sent: {total_sent}")
-else:
-    total_sent = 0
-    logging.info("No emails were successfully sent.")
+    if successful_recipients:
+        logger.info("\n✅ SUCCESSFUL DELIVERIES (%d):", len(successful_recipients))
+        for idx, email in enumerate(successful_recipients, 1):
+            logger.info("   %03d. %s", idx, email)
+    else:
+        logger.warning("\n⚠️ NO SUCCESSFUL DELIVERIES IN THIS SESSION")
 
-# Save the number of emails sent
-logging.info(f"Emails sent: {total_sent}")
+    failed_count = len(all_recipients) - len(successful_recipients)
+    success_rate = (len(successful_recipients) / len(all_recipients)) * 100 if all_recipients else 0
 
-# Print out the success message and count of emails sent
-print(f"Program executed successfully. {total_sent} emails sent.")
+    logger.info("\n📊 SESSION STATISTICS:")
+    logger.info("   Total recipients processed: %4d", len(all_recipients))
+    logger.info("   Successfully sent:         %4d (%.1f%%)", len(successful_recipients), success_rate)
+    logger.info("   Failed/skipped:            %4d", failed_count)
+    logger.info("="*60 + "\n")
 
-# Calculate total number of emails sent
-def get_total_emails_sent():
-    try:
-        total_emails = 0
-        with open(log_file_path, 'r') as file:
-            for line in file:
-                parts = line.split(' - Emails sent: ')
-                if len(parts) == 2:
-                    try:
-                        total_emails += int(parts[1].strip())
-                    except ValueError:
-                        continue
-        return total_emails
-    except FileNotFoundError:
-        return 0
+def main():
+    parser = argparse.ArgumentParser(description="Send bulk emails with attachments.")
+    parser.add_argument("--attachments", required=True, help="Directory containing attachments")
+    parser.add_argument("--emails", required=True, help="File containing recipient emails")
+    parser.add_argument("--message", required=True, help="File containing email message")
+    args = parser.parse_args()
 
-total_emails_sent = get_total_emails_sent()
-logging.info(f"Total emails sent so far: {total_emails_sent}")
+    # Create log directory structure
+    log_base_dir = 'Logs'
+    attachment_log_dir = os.path.join(log_base_dir, args.attachments)
+    os.makedirs(attachment_log_dir, exist_ok=True)  # Create directory if not exists
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file_name = f"session_{timestamp}.log"
+    log_file_path = os.path.join(attachment_log_dir, log_file_name)
+
+    setup_file_logging(log_file_path)
+
+    logger.info("🚀 PROGRAM START - NEW SESSION")
+    logger.info("="*60 + "\n")
+    logger.info("📁 Log directory: %s", attachment_log_dir)
+
+    data_dir = 'Data'
+    docs_dir = 'Docs'
+    attachments_dir = os.path.join(docs_dir, args.attachments)
+    emails_file = os.path.join(data_dir, args.emails)
+    message_file = os.path.join(data_dir, args.message)
+
+    if not os.path.isdir(attachments_dir):
+        raise FileNotFoundError(f"Attachments directory not found: {attachments_dir}")
+    if not os.path.isfile(emails_file):
+        raise FileNotFoundError(f"Emails file not found: {emails_file}")
+    if not os.path.isfile(message_file):
+        raise FileNotFoundError(f"Message file not found: {message_file}")
+
+    email, password = read_email_credentials(args.attachments)
+    logger.info("🔑 Using email account: %s", email)
+
+    with open(emails_file, 'r') as f:
+        recipients = [line.strip() for line in f if line.strip()]
+    logger.info("📩 Loaded %d recipient emails", len(recipients))
+
+    with open(message_file, 'r') as f:
+        lines = f.readlines()
+        subject = lines[0].split("Betreff: ")[1].strip() if "Betreff: " in lines[0] else "No Subject"
+        body = ''.join(lines[1:])
+    logger.info("✉️ Email subject: '%s'", subject)
+
+    attachments = [f for f in os.listdir(attachments_dir) if not f.startswith('credentials')]
+    logger.info("📎 Attachments (%d): %s", len(attachments), ", ".join(attachments))
+
+    successful = []
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {executor.submit(send_email, recipient, email, password, subject, body, attachments_dir, args): recipient for recipient in recipients}
+
+        for future in as_completed(futures):
+            result = future.result()
+            if result:
+                successful.append(result)
+
+    log_email_summary(successful, recipients)
+
+    logger.info("🏁 PROGRAM END")
+    return 0
+
+if __name__ == "__main__":
+    exit(main())
